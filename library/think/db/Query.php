@@ -395,13 +395,13 @@ class Query
     public function value($field, $default = null, $force = false)
     {
         $result = false;
-        if (empty($options['fetch_sql']) && !empty($this->options['cache'])) {
+        if (empty($this->options['fetch_sql']) && !empty($this->options['cache'])) {
             // 判断查询缓存
             $cache = $this->options['cache'];
             if (empty($this->options['table'])) {
                 $this->options['table'] = $this->getTable();
             }
-            $key    = is_string($cache['key']) ? $cache['key'] : md5($field . serialize($this->options));
+            $key    = is_string($cache['key']) ? $cache['key'] : md5($field . serialize($this->options) . serialize($this->bind));
             $result = Cache::get($key);
         }
         if (false === $result) {
@@ -415,8 +415,9 @@ class Query
             }
             $result = $pdo->fetchColumn();
             if ($force) {
-                $result = is_numeric($result) ? $result + 0 : $result;
+                $result += 0;
             }
+
             if (isset($cache)) {
                 // 缓存数据
                 $this->cacheData($key, $result, $cache);
@@ -438,20 +439,22 @@ class Query
     public function column($field, $key = '')
     {
         $result = false;
-        if (empty($options['fetch_sql']) && !empty($this->options['cache'])) {
+        if (empty($this->options['fetch_sql']) && !empty($this->options['cache'])) {
             // 判断查询缓存
             $cache = $this->options['cache'];
             if (empty($this->options['table'])) {
                 $this->options['table'] = $this->getTable();
             }
-            $guid   = is_string($cache['key']) ? $cache['key'] : md5($field . serialize($this->options));
+            $guid   = is_string($cache['key']) ? $cache['key'] : md5($field . serialize($this->options) . serialize($this->bind));
             $result = Cache::get($guid);
         }
         if (false === $result) {
             if (isset($this->options['field'])) {
                 unset($this->options['field']);
             }
-            if ($key && '*' != $field) {
+            if (is_null($field)) {
+                $field = '*';
+            } elseif ($key && '*' != $field) {
                 $field = $key . ',' . $field;
             }
             $pdo = $this->field($field)->getPdo();
@@ -594,7 +597,7 @@ class Query
         }
         if ($lazyTime > 0) {
             // 延迟写入
-            $guid = md5($this->getTable() . '_' . $field . '_' . serialize($condition));
+            $guid = md5($this->getTable() . '_' . $field . '_' . serialize($condition) . serialize($this->bind));
             $step = $this->lazyWrite('inc', $guid, $step, $lazyTime);
             if (false === $step) {
                 // 清空查询条件
@@ -623,7 +626,7 @@ class Query
         }
         if ($lazyTime > 0) {
             // 延迟写入
-            $guid = md5($this->getTable() . '_' . $field . '_' . serialize($condition));
+            $guid = md5($this->getTable() . '_' . $field . '_' . serialize($condition) . serialize($this->bind));
             $step = $this->lazyWrite('dec', $guid, $step, $lazyTime);
             if (false === $step) {
                 // 清空查询条件
@@ -649,16 +652,16 @@ class Query
         if (!Cache::has($guid . '_time')) {
             // 计时开始
             Cache::set($guid . '_time', $_SERVER['REQUEST_TIME'], 0);
-            Cache::$type($guid, $step, 0);
+            Cache::$type($guid, $step);
         } elseif ($_SERVER['REQUEST_TIME'] > Cache::get($guid . '_time') + $lazyTime) {
             // 删除缓存
-            $value = Cache::$type($guid, $step, 0);
+            $value = Cache::$type($guid, $step);
             Cache::rm($guid);
             Cache::rm($guid . '_time');
             return 0 === $value ? false : $value;
         } else {
             // 更新缓存
-            Cache::$type($guid, $step, 0);
+            Cache::$type($guid, $step);
         }
         return false;
     }
@@ -1117,6 +1120,21 @@ class Query
     public function whereExp($field, $condition, $logic = 'AND')
     {
         $this->parseWhereExp($logic, $field, 'exp', $condition);
+        return $this;
+    }
+
+    /**
+     * 设置软删除字段及条件
+     * @access public
+     * @param false|string  $field     查询字段
+     * @param mixed         $condition 查询条件
+     * @return $this
+     */
+    public function useSoftDelete($field, $condition = null)
+    {
+        if ($field) {
+            $this->options['soft_delete'] = [$field, $condition ?: ['null', '']];
+        }
         return $this;
     }
 
@@ -1759,21 +1777,21 @@ class Query
     }
 
     // 获取当前数据表字段信息
-    public function getTableFields($options)
+    public function getTableFields($table = '')
     {
-        return $this->getTableInfo($options['table'], 'fields');
+        return $this->getTableInfo($table ?: $this->getOptions('table'), 'fields');
     }
 
     // 获取当前数据表字段类型
-    public function getFieldsType($options)
+    public function getFieldsType($table = '')
     {
-        return $this->getTableInfo($options['table'], 'type');
+        return $this->getTableInfo($table ?: $this->getOptions('table'), 'type');
     }
 
     // 获取当前数据表绑定信息
-    public function getFieldsBind($options)
+    public function getFieldsBind($table = '')
     {
-        $types = $this->getFieldsType($options);
+        $types = $this->getFieldsType($table);
         $bind  = [];
         if ($types) {
             foreach ($types as $key => $type) {
@@ -1886,6 +1904,9 @@ class Query
                 $closure    = $relation;
                 $relation   = $key;
                 $with[$key] = $key;
+            } elseif (is_array($relation)) {
+                $subRelation = $relation;
+                $relation    = $key;
             } elseif (is_string($relation) && strpos($relation, '.')) {
                 $with[$key]                   = $relation;
                 list($relation, $subRelation) = explode('.', $relation, 2);
@@ -1895,7 +1916,7 @@ class Query
             $relation = Loader::parseName($relation, 1, false);
             $model    = $class->$relation();
             if ($model instanceof OneToOne && 0 == $model->getEagerlyType()) {
-                $model->removeOption()->eagerly($this, $relation, $subRelation, $closure, $first);
+                $model->eagerly($this, $relation, $subRelation, $closure, $first);
                 $first = false;
             } elseif ($closure) {
                 $with[$key] = $closure;
@@ -1983,7 +2004,7 @@ class Query
             $relation = explode(',', $relation);
         }
         if (isset($this->options['relation'])) {
-            $this->options['relation'] = array_mrege($this->options['relation'], $relation);
+            $this->options['relation'] = array_merge($this->options['relation'], $relation);
         } else {
             $this->options['relation'] = $relation;
         }
@@ -2060,7 +2081,7 @@ class Query
         }
 
         // 执行操作
-        $result = $this->execute($sql, $bind);
+        $result = 0 === $sql ? 0 : $this->execute($sql, $bind);
         if ($result) {
             $sequence  = $sequence ?: (isset($options['sequence']) ? $options['sequence'] : null);
             $lastInsId = $this->getLastInsID($sequence);
@@ -2097,9 +2118,10 @@ class Query
      * 批量插入记录
      * @access public
      * @param mixed $dataSet 数据集
+     * @param boolean $replace  是否replace
      * @return integer|string
      */
-    public function insertAll(array $dataSet)
+    public function insertAll(array $dataSet, $replace = false)
     {
         // 分析查询表达式
         $options = $this->parseExpress();
@@ -2107,7 +2129,7 @@ class Query
             return false;
         }
         // 生成SQL语句
-        $sql = $this->builder->insertAll($dataSet, $options);
+        $sql = $this->builder->insertAll($dataSet, $options, $replace);
         // 获取参数绑定
         $bind = $this->getBind();
         if ($options['fetch_sql']) {
@@ -2189,7 +2211,7 @@ class Query
                 $options['where']['AND'] = $where;
             }
         } elseif (!isset($key) && is_string($pk) && isset($options['where']['AND'][$pk])) {
-            $key = $this->getCacheKey($options['where']['AND'][$pk], $options);
+            $key = $this->getCacheKey($options['where']['AND'][$pk], $options, $this->bind);
         }
 
         // 生成UPDATE SQL语句
@@ -2277,10 +2299,10 @@ class Query
             // 判断查询缓存
             $cache = $options['cache'];
             unset($options['cache']);
-            $key       = is_string($cache['key']) ? $cache['key'] : md5(serialize($options));
+            $key       = is_string($cache['key']) ? $cache['key'] : md5(serialize($options) . serialize($this->bind));
             $resultSet = Cache::get($key);
         }
-        if (!$resultSet) {
+        if (false === $resultSet) {
             // 生成查询SQL
             $sql = $this->builder->select($options);
             // 获取参数绑定
@@ -2302,7 +2324,7 @@ class Query
                 }
             }
 
-            if (isset($cache) && $resultSet) {
+            if (isset($cache) && false !== $resultSet) {
                 // 缓存数据集
                 $this->cacheData($key, $resultSet, $cache);
             }
@@ -2314,7 +2336,7 @@ class Query
             $modelName = $this->model;
             if (count($resultSet) > 0) {
                 foreach ($resultSet as $key => $result) {
-                    /** @var Model $result */
+                    /** @var Model $model */
                     $model = new $modelName($result);
                     $model->isUpdate(true);
 
@@ -2369,8 +2391,10 @@ class Query
      * @access public
      * @param mixed     $value   缓存数据
      * @param array     $options 缓存参数
+     * @param array     $bind    绑定参数
+     * @return string
      */
-    protected function getCacheKey($value, $options)
+    protected function getCacheKey($value, $options, $bind = [])
     {
         if (is_scalar($value)) {
             $data = $value;
@@ -2378,9 +2402,9 @@ class Query
             $data = $value[1];
         }
         if (isset($data)) {
-            return 'think:' . $options['table'] . '|' . $data;
+            return 'think:' . (is_array($options['table']) ? key($options['table']) : $options['table']) . '|' . $data;
         } else {
-            return md5(serialize($options));
+            return md5(serialize($options) . serialize($bind));
         }
     }
 
@@ -2408,7 +2432,7 @@ class Query
             // AR模式分析主键条件
             $this->parsePkWhere($data, $options);
         } elseif (!empty($options['cache']) && true === $options['cache']['key'] && is_string($pk) && isset($options['where']['AND'][$pk])) {
-            $key = $this->getCacheKey($options['where']['AND'][$pk], $options);
+            $key = $this->getCacheKey($options['where']['AND'][$pk], $options, $this->bind);
         }
 
         $options['limit'] = 1;
@@ -2421,7 +2445,7 @@ class Query
             } elseif (is_string($cache['key'])) {
                 $key = $cache['key'];
             } elseif (!isset($key)) {
-                $key = md5(serialize($options));
+                $key = md5(serialize($options) . serialize($this->bind));
             }
             $result = Cache::get($key);
         }
@@ -2459,7 +2483,7 @@ class Query
                 $result = isset($resultSet[0]) ? $resultSet[0] : null;
             }
 
-            if (isset($cache) && $result) {
+            if (isset($cache) && false !== $result) {
                 // 缓存数据
                 $this->cacheData($key, $result, $cache);
             }
@@ -2542,9 +2566,10 @@ class Query
      * @param integer  $count    每次处理的数据数量
      * @param callable $callback 处理回调方法
      * @param string   $column   分批处理的字段名
+     * @param string   $order    排序规则
      * @return boolean
      */
-    public function chunk($count, $callback, $column = null)
+    public function chunk($count, $callback, $column = null, $order = 'asc')
     {
         $options = $this->getOptions();
         if (isset($options['table'])) {
@@ -2552,9 +2577,12 @@ class Query
         } else {
             $table = '';
         }
-        $column    = $column ?: $this->getPk($table);
+        $column = $column ?: $this->getPk($table);
+        if (is_array($column)) {
+            $column = $column[0];
+        }
         $bind      = $this->bind;
-        $resultSet = $this->limit($count)->order($column, 'asc')->select();
+        $resultSet = $this->limit($count)->order($column, $order)->select();
         if (strpos($column, '.')) {
             list($alias, $key) = explode('.', $column);
         } else {
@@ -2573,8 +2601,8 @@ class Query
             $resultSet = $this->options($options)
                 ->limit($count)
                 ->bind($bind)
-                ->where($column, '>', $lastId)
-                ->order($column, 'asc')
+                ->where($column, 'asc' == strtolower($order) ? '>' : '<', $lastId)
+                ->order($column, $order)
                 ->select();
             if ($resultSet instanceof Collection) {
                 $resultSet = $resultSet->all();
@@ -2632,7 +2660,7 @@ class Query
             // AR模式分析主键条件
             $this->parsePkWhere($data, $options);
         } elseif (!isset($key) && is_string($pk) && isset($options['where']['AND'][$pk])) {
-            $key = $this->getCacheKey($options['where']['AND'][$pk], $options);
+            $key = $this->getCacheKey($options['where']['AND'][$pk], $options, $this->bind);
         }
 
         if (true !== $data && empty($options['where'])) {

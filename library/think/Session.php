@@ -56,7 +56,7 @@ class Session
             $isDoStart = true;
         }
 
-        if (isset($config['prefix'])) {
+        if (isset($config['prefix']) && (self::$prefix === '' || self::$prefix === null)) {
             self::$prefix = $config['prefix'];
         }
         if (isset($config['var_session_id']) && isset($_REQUEST[$config['var_session_id']])) {
@@ -347,7 +347,7 @@ class Session
      * @param bool $delete 是否删除关联会话文件
      * @return void
      */
-    private static function regenerate($delete = false)
+    public static function regenerate($delete = false)
     {
         session_regenerate_id($delete);
     }
